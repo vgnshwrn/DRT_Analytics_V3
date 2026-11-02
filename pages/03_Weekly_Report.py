@@ -10,7 +10,14 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    PageBreak,
+)
 
 from database import get_supabase
 
@@ -20,9 +27,9 @@ from database import get_supabase
 # ============================================================
 
 st.set_page_config(
-    page_title="DRT Weekly Report",
+    page_title="DRT Monthly Report",
     page_icon="DRT",
-    layout="wide"
+    layout="wide",
 )
 
 
@@ -54,11 +61,11 @@ st.markdown(
         </div>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-st.title("Weekly Report")
-st.caption("Weekly DRT performance report for one selected week.")
+st.title("Monthly Report")
+st.caption("Monthly DRT performance report across all registered weeks in the selected month.")
 
 
 # ============================================================
@@ -111,7 +118,7 @@ def fetch_all_rows(table_name, select_columns, page_size=1000):
 
 
 # ============================================================
-# LOAD REGISTERED WEEKS
+# LOAD WEEKS
 # ============================================================
 
 @st.cache_data(ttl=60)
@@ -119,7 +126,7 @@ def load_weeks():
 
     rows = fetch_all_rows(
         "drt_weeks",
-        "week_id, week_name, start_date, end_date"
+        "week_id, week_name, start_date, end_date",
     )
 
     if not rows:
@@ -129,17 +136,17 @@ def load_weeks():
 
     result["week_id"] = pd.to_numeric(
         result["week_id"],
-        errors="coerce"
+        errors="coerce",
     )
 
     result["start_date"] = pd.to_datetime(
         result["start_date"],
-        errors="coerce"
+        errors="coerce",
     ).dt.date
 
     result["end_date"] = pd.to_datetime(
         result["end_date"],
-        errors="coerce"
+        errors="coerce",
     ).dt.date
 
     result["week_name"] = (
@@ -159,7 +166,7 @@ if weeks_df.empty:
 
 
 # ============================================================
-# LOAD ALL DRT DATA
+# LOAD DRT DATA
 # ============================================================
 
 @st.cache_data(ttl=60)
@@ -169,6 +176,7 @@ def load_staging_data():
         "drt_import_staging",
         """
         source_file,
+        week_name,
         class_name,
         section,
         stream,
@@ -178,7 +186,7 @@ def load_staging_data():
         subject_name,
         marks,
         status
-        """
+        """,
     )
 
     if not rows:
@@ -205,7 +213,7 @@ for col in [
     "stream",
     "student_name",
     "subject_name",
-    "status"
+    "status",
 ]:
 
     if col not in df.columns:
@@ -220,48 +228,41 @@ for col in [
 
 df["test_date"] = pd.to_datetime(
     df["test_date"],
-    errors="coerce"
+    errors="coerce",
 )
 
 df["marks"] = pd.to_numeric(
     df["marks"],
-    errors="coerce"
+    errors="coerce",
 )
 
 df["roll_no"] = pd.to_numeric(
     df["roll_no"],
-    errors="coerce"
+    errors="coerce",
 )
 
 
 # ============================================================
 # SUBJECT NORMALIZATION
-# Same canonical names used by Analytics.
 # ============================================================
 
 SUBJECT_NORMALIZATION = {
     "cs": "Computer Science",
     "computer science": "Computer Science",
-
     "math": "Maths",
     "maths": "Maths",
-
     "english": "English",
     "physics": "Physics",
     "chemistry": "Chemistry",
     "biology": "Biology",
-
     "social": "Social Science",
     "social science": "Social Science",
-
     "tamil": "Tamil",
     "accountancy": "Accountancy",
     "business studies": "Business Studies",
     "economics": "Economics",
-
     "applied math": "Applied Maths",
     "applied maths": "Applied Maths",
-
     "computer science / applied maths": "Computer Science / Applied Maths",
     "computer science/applied maths": "Computer Science / Applied Maths",
     "cs/applied math": "Computer Science / Applied Maths",
@@ -291,7 +292,6 @@ df["subject_name"] = df["subject_name"].apply(normalize_subject)
 
 # ============================================================
 # SOURCE FILE -> REGISTERED WEEK
-# Same week identification rule used by Analytics.
 # ============================================================
 
 def identify_week_name(source_file):
@@ -414,23 +414,61 @@ def identify_week_name(source_file):
     return None
 
 
-df["week_name"] = df["source_file"].apply(identify_week_name)
+# Use the explicit week assignment stored in Supabase.
+# Fall back to filename recognition only for older rows where week_name is empty.
+if "week_name" not in df.columns:
+    df["week_name"] = None
+
+df["week_name"] = (
+    df["week_name"]
+    .astype("string")
+    .str.strip()
+)
+
+missing_week = df["week_name"].isna() | (df["week_name"] == "")
+df.loc[missing_week, "week_name"] = (
+    df.loc[missing_week, "source_file"]
+    .apply(identify_week_name)
+)
 
 
 # ============================================================
-# VALID WEEKS
+# MONTH MAPPING FROM REGISTERED WEEK NAME
+# ============================================================
+# IMPORTANT:
+# A DRT week is an academic/reporting week, not necessarily a
+# calendar week. For example, the registered "July 1st Week"
+# runs from 2026-06-29 to 2026-07-05. Its reporting month must
+# therefore be JULY, based on the registered week name, rather
+# than on start_date.month.
+
+weeks_df["month_name"] = (
+    weeks_df["week_name"]
+    .astype("string")
+    .str.strip()
+    .str.extract(r"^([A-Za-z]+)", expand=False)
+    .str.title()
+)
+
+week_to_month = dict(
+    zip(weeks_df["week_name"], weeks_df["month_name"])
+)
+
+df["month_name"] = df["week_name"].map(week_to_month)
+
+
+# ============================================================
+# AVAILABLE MONTHS
 # ============================================================
 
-week_options = weeks_df["week_name"].tolist()
+available_months = []
 
-available_week_options = [
-    week
-    for week in week_options
-    if (df["week_name"] == week).any()
-]
+for month in weeks_df["month_name"].dropna().tolist():
+    if month not in available_months and (df["month_name"] == month).any():
+        available_months.append(month)
 
-if not available_week_options:
-    st.error("No staging records match the registered DRT weeks.")
+if not available_months:
+    st.error("No staging records match the registered DRT months.")
     st.stop()
 
 
@@ -441,30 +479,52 @@ if not available_week_options:
 st.divider()
 st.header("Report Selection")
 
-selected_week = st.selectbox(
-    "Select Week",
-    options=available_week_options,
-    index=len(available_week_options) - 1
+selected_month = st.selectbox(
+    "Select Month",
+    options=available_months,
+    index=len(available_months) - 1,
+)
+
+month_weeks = weeks_df[
+    weeks_df["month_name"] == selected_month
+].copy()
+
+month_weeks = month_weeks[
+    month_weeks["week_name"].isin(
+        df.loc[df["month_name"] == selected_month, "week_name"].dropna().unique()
+    )
+].sort_values("start_date")
+
+if month_weeks.empty:
+    st.warning("No DRT weeks are available for the selected month.")
+    st.stop()
+
+st.caption(
+    f"Weeks included in {selected_month}: "
+    + ", ".join(month_weeks["week_name"].tolist())
 )
 
 
+# ============================================================
+# CLASS
+# ============================================================
+
+month_df = df[df["month_name"] == selected_month]
+
 class_options = sorted(
-    df.loc[
-        df["week_name"] == selected_week,
-        "class_name"
-    ]
+    month_df["class_name"]
     .dropna()
     .unique()
     .tolist()
 )
 
 if not class_options:
-    st.warning("No classes found for the selected week.")
+    st.warning("No classes found for the selected month.")
     st.stop()
 
 selected_class = st.selectbox(
     "Select Class",
-    options=class_options
+    options=class_options,
 )
 
 
@@ -473,10 +533,9 @@ selected_class = st.selectbox(
 # ============================================================
 
 section_options = sorted(
-    df.loc[
-        (df["week_name"] == selected_week)
-        & (df["class_name"] == selected_class),
-        "section"
+    month_df.loc[
+        month_df["class_name"] == selected_class,
+        "section",
     ]
     .dropna()
     .astype(str)
@@ -487,12 +546,12 @@ section_options = sorted(
 )
 
 if not section_options:
-    st.warning("No sections found for the selected week and class.")
+    st.warning("No sections found for the selected month and class.")
     st.stop()
 
 selected_section = st.selectbox(
     "Select Section",
-    options=section_options
+    options=section_options,
 )
 
 
@@ -501,11 +560,10 @@ selected_section = st.selectbox(
 # ============================================================
 
 subject_options = sorted(
-    df.loc[
-        (df["week_name"] == selected_week)
-        & (df["class_name"] == selected_class)
-        & (df["section"] == selected_section),
-        "subject_name"
+    month_df.loc[
+        (month_df["class_name"] == selected_class)
+        & (month_df["section"] == selected_section),
+        "subject_name",
     ]
     .dropna()
     .unique()
@@ -513,23 +571,21 @@ subject_options = sorted(
 )
 
 if not subject_options:
-    st.warning(
-        "No subjects found for the selected week, class and section."
-    )
+    st.warning("No subjects found for the selected month, class and section.")
     st.stop()
 
 selected_subject = st.selectbox(
     "Select Subject",
-    options=subject_options
+    options=subject_options,
 )
 
 
 # ============================================================
-# FILTER SELECTED WEEK / CLASS / SECTION / SUBJECT
+# FILTER SELECTED MONTH / CLASS / SECTION / SUBJECT
 # ============================================================
 
 filtered_df = df[
-    (df["week_name"] == selected_week)
+    (df["month_name"] == selected_month)
     & (df["class_name"] == selected_class)
     & (df["section"] == selected_section)
     & (df["subject_name"] == selected_subject)
@@ -537,10 +593,7 @@ filtered_df = df[
 
 
 # ============================================================
-# VALID MARKS
-# Absent / OD / SB / P / NC / Holiday / Not Conducted
-# records do not participate in performance calculations.
-# A genuine numeric 0 remains a valid mark.
+# EXCLUDED STATUSES
 # ============================================================
 
 EXCLUDED_STATUSES = {
@@ -574,536 +627,690 @@ if valid_df.empty:
 
 # ============================================================
 # BUILD WEEKLY STUDENT AVERAGES
-# Same logic as Analytics:
-# multiple valid entries for a student in the selected week
-# are averaged. Absent / blank marks are ignored.
 # ============================================================
 
-student_weekly = (
-    valid_df
-    .groupby(
-        ["roll_no", "student_name"],
-        dropna=False
-    )["marks"]
-    .mean()
-    .reset_index()
-)
+weekly_data = {}
 
-student_weekly["roll_no"] = pd.to_numeric(
-    student_weekly["roll_no"],
-    errors="coerce"
-)
+for week_name in month_weeks["week_name"].tolist():
 
-student_weekly = student_weekly[
-    student_weekly["roll_no"].notna()
-].copy()
+    week_df = valid_df[
+        valid_df["week_name"] == week_name
+    ].copy()
 
-student_weekly["roll_no"] = student_weekly["roll_no"].astype(int)
-student_weekly = student_weekly.sort_values("marks", ascending=False)
+    if week_df.empty:
+        continue
 
-if student_weekly.empty:
-    st.warning("No students with valid marks were found.")
+    grouped = (
+        week_df
+        .groupby(["roll_no", "student_name"], dropna=False)["marks"]
+        .mean()
+        .reset_index()
+    )
+
+    grouped["roll_no"] = pd.to_numeric(
+        grouped["roll_no"],
+        errors="coerce",
+    )
+
+    grouped = grouped[grouped["roll_no"].notna()].copy()
+
+    if grouped.empty:
+        continue
+
+    grouped["roll_no"] = grouped["roll_no"].astype(int)
+    grouped = grouped.sort_values("roll_no")
+
+    weekly_data[week_name] = grouped
+
+
+if not weekly_data:
+    st.warning("No weekly student averages could be calculated.")
     st.stop()
 
 
 # ============================================================
-# CLASS AVERAGE
-# Same Analytics rule: mean of each student's weekly average.
+# MONTHLY STUDENT MATRIX
 # ============================================================
 
-class_average = float(student_weekly["marks"].mean())
+all_weeks = month_weeks["week_name"].tolist()
+
+student_keys = set()
+student_names = {}
+
+for week_name, week_df in weekly_data.items():
+    for _, row in week_df.iterrows():
+        roll = int(row["roll_no"])
+        student_keys.add(roll)
+        student_names[roll] = row["student_name"]
 
 
-# ============================================================
-# REPORT CATEGORIES
-# ============================================================
+monthly_rows = []
 
-# Rank by highest weekly average using DENSE RANKING.
-#
-# Example:
-#   4.75 -> 1st
-#   4.75 -> 1st
-#   4.50 -> 2nd
-#
-# This means a tie for 1st does not consume the 2nd-place rank.
-ranked_df = student_weekly.sort_values(
-    ["marks", "student_name"],
-    ascending=[False, True]
-).reset_index(drop=True)
+for roll in sorted(student_keys):
 
-ranked_df["rank"] = (
-    ranked_df["marks"]
-    .rank(
-        method="dense",
-        ascending=False
+    row = {
+        "roll_no": roll,
+        "student_name": student_names.get(roll, ""),
+    }
+
+    weekly_values = []
+
+    for week_name in all_weeks:
+
+        week_df = weekly_data.get(week_name)
+
+        value = None
+
+        if week_df is not None:
+            matches = week_df[week_df["roll_no"] == roll]
+            if not matches.empty:
+                value = float(matches.iloc[0]["marks"])
+
+        row[week_name] = value
+
+        if value is not None:
+            weekly_values.append(value)
+
+    row["weeks_present"] = len(weekly_values)
+    row["monthly_average"] = (
+        sum(weekly_values) / len(weekly_values)
+        if weekly_values
+        else None
     )
-    .astype(int)
+
+    monthly_rows.append(row)
+
+
+monthly_df = pd.DataFrame(monthly_rows)
+monthly_df = monthly_df[monthly_df["monthly_average"].notna()].copy()
+
+if monthly_df.empty:
+    st.warning("No monthly performance data is available.")
+    st.stop()
+
+
+# ============================================================
+# CONTINUOUS TOPPERS
+# A continuous topper must have a valid performance in every
+# registered week of the selected month.
+# Among those students, rank by the average of their weekly
+# averages. Dense ranking is used for ties.
+# ============================================================
+
+continuous_df = monthly_df[
+    monthly_df["weeks_present"] == len(all_weeks)
+].copy()
+
+if not continuous_df.empty:
+    continuous_df["rank"] = (
+        continuous_df["monthly_average"]
+        .rank(method="dense", ascending=False)
+        .astype(int)
+    )
+else:
+    continuous_df["rank"] = pd.Series(dtype="int64")
+
+first_place_df = continuous_df[
+    continuous_df["rank"] == 1
+].copy()
+
+second_place_df = continuous_df[
+    continuous_df["rank"] == 2
+].copy()
+
+
+# ============================================================
+# IMPROVEMENT
+# Improvement is calculated from the first registered week
+# to the latest registered week of the selected month.
+# Only students with valid marks in both endpoints qualify.
+# ============================================================
+
+first_week = all_weeks[0]
+latest_week = all_weeks[-1]
+
+improvement_df = monthly_df[
+    monthly_df[first_week].notna()
+    & monthly_df[latest_week].notna()
+].copy()
+
+improvement_df["change"] = (
+    improvement_df[latest_week]
+    - improvement_df[first_week]
 )
 
-# Include every student holding the 1st or 2nd rank.
-toppers_df = ranked_df[
-    ranked_df["rank"] <= 2
+very_good_df = improvement_df[
+    improvement_df["change"] > 0.70
 ].copy()
 
-
-above_average_df = ranked_df[
-    ranked_df["marks"] > class_average
+improving_df = improvement_df[
+    (improvement_df["change"] > 0)
+    & (improvement_df["change"] <= 0.70)
 ].copy()
 
-below_average_df = ranked_df[
-    ranked_df["marks"] < class_average
-].copy()
+very_good_df = very_good_df.sort_values(
+    "change", ascending=False
+)
 
-very_poor_df = ranked_df.tail(3).copy()
-very_poor_df = very_poor_df.sort_values(
-    ["marks", "student_name"],
-    ascending=[True, True]
-).reset_index(drop=True)
+improving_df = improving_df.sort_values(
+    "change", ascending=False
+)
+
+
+# ============================================================
+# CONTINUOUSLY DECLINING STUDENTS
+# A student qualifies only when performance decreases in every
+# consecutive week of the selected month. The student must have
+# valid marks in every week.
+# ============================================================
+
+if len(all_weeks) >= 2:
+    complete_month_df = monthly_df[
+        monthly_df[all_weeks].notna().all(axis=1)
+    ].copy()
+
+    def is_continuously_declining(row):
+        values = [float(row[w]) for w in all_weeks]
+        return all(values[i] < values[i - 1] for i in range(1, len(values)))
+
+    declining_df = complete_month_df[
+        complete_month_df.apply(is_continuously_declining, axis=1)
+    ].copy()
+
+    if not declining_df.empty:
+        declining_df["change"] = (
+            declining_df[latest_week] - declining_df[first_week]
+        )
+        declining_df = declining_df.sort_values(
+            "change", ascending=True
+        )
+else:
+    declining_df = pd.DataFrame()
+
+
+# ============================================================
+# LAST THREE STUDENTS
+# Lowest monthly average among students with at least one valid
+# weekly performance. Students with no valid performance are not
+# included.
+# ============================================================
+
+last_three_df = (
+    monthly_df
+    .sort_values(
+        ["monthly_average", "student_name"],
+        ascending=[True, True],
+    )
+    .head(3)
+    .copy()
+)
 
 
 # ============================================================
 # DISPLAY HELPERS
 # ============================================================
 
-def display_student_table(dataframe, mark_column="Average"):
+def make_student_table(dataframe, value_column, value_label):
 
     if dataframe.empty:
-        st.info("No students in this category.")
-        return
+        return pd.DataFrame()
 
-    result = dataframe[["student_name", "marks"]].copy()
+    result = dataframe[
+        ["student_name", value_column]
+    ].copy()
 
     result.columns = [
         "Student Name",
-        mark_column
+        value_label,
     ]
 
-    result[mark_column] = result[mark_column].round(2)
+    result[value_label] = result[value_label].round(2)
     result.insert(0, "S.No", range(1, len(result) + 1))
 
-    st.dataframe(
-        result,
-        hide_index=True,
-        width="stretch"
-    )
+    return result
+
+
+def show_empty(message):
+    st.info(message)
 
 
 # ============================================================
-# REPORT HEADER
+# SELECTED PERIOD
 # ============================================================
 
 st.divider()
+st.header("Monthly DRT Performance Report")
 
-st.header("Weekly DRT Performance Report")
+info_col1, info_col2, info_col3, info_col4 = st.columns(4)
 
-week_row = weeks_df[
-    weeks_df["week_name"] == selected_week
-]
+with info_col1:
+    st.metric("Month", selected_month)
 
-if not week_row.empty:
-    week_row = week_row.iloc[0]
-    start_text = (
-        week_row["start_date"].strftime("%d-%m-%Y")
-        if pd.notna(week_row["start_date"])
-        else ""
-    )
-    end_text = (
-        week_row["end_date"].strftime("%d-%m-%Y")
-        if pd.notna(week_row["end_date"])
-        else ""
-    )
+with info_col2:
+    st.metric("Class", selected_class)
+
+with info_col3:
+    st.metric("Section", selected_section)
+
+with info_col4:
+    st.metric("Subject", selected_subject)
+
+st.caption(
+    "Included weeks: " + ", ".join(all_weeks)
+)
+
+
+# ============================================================
+# 1. CONTINUOUS TOPPERS
+# ============================================================
+
+st.divider()
+st.subheader("1. Continuous Topper – 1st Place")
+st.caption(
+    "Students with valid performance in every week of the selected month, "
+    "ranked by their monthly average of weekly averages."
+)
+
+if first_place_df.empty:
+    show_empty("No student completed every week of the selected month, so a continuous 1st-place result cannot be determined.")
 else:
-    start_text = ""
-    end_text = ""
+    result = make_student_table(
+        first_place_df.sort_values("monthly_average", ascending=False),
+        "monthly_average",
+        "Monthly Average",
+    )
+    st.dataframe(result, hide_index=True, width="stretch")
 
-st.write(f"**Week:** {selected_week}")
-st.write(f"**Class:** {selected_class}")
-st.write(f"**Section:** {selected_section}")
-st.write(f"**Subject:** {selected_subject}")
 
-if start_text and end_text:
-    st.write(f"**Period:** {start_text} to {end_text}")
+st.subheader("2. Continuous Topper – 2nd Place")
 
-st.metric("Class Average", f"{class_average:.2f} / 5")
+if second_place_df.empty:
+    show_empty("No continuous 2nd-place student is available for the selected month.")
+else:
+    result = make_student_table(
+        second_place_df.sort_values("monthly_average", ascending=False),
+        "monthly_average",
+        "Monthly Average",
+    )
+    st.dataframe(result, hide_index=True, width="stretch")
 
 
 # ============================================================
-# 1. FIRST AND SECOND PLACE
+# 2. VERY GOOD IMPROVEMENT
 # ============================================================
 
 st.divider()
-st.subheader("1. First and Second Place")
-
-topper_display = toppers_df[
-    ["rank", "student_name", "marks"]
-].copy()
-
-topper_display["Place"] = topper_display["rank"].map(
-    {
-        1: "1st Place",
-        2: "2nd Place"
-    }
+st.subheader("3. Students Showing Very Good Improvement")
+st.caption(
+    f"Overall improvement of more than +0.70 from {first_week} to {latest_week}."
 )
 
-topper_display = topper_display[
-    ["Place", "student_name", "marks"]
-]
+if very_good_df.empty:
+    show_empty("No students show more than +0.70 overall improvement.")
+else:
+    result = very_good_df[
+        ["student_name", first_week, latest_week, "change"]
+    ].copy()
+    result.columns = [
+        "Student Name",
+        "First Week Average",
+        "Latest Week Average",
+        "Improvement",
+    ]
+    result["First Week Average"] = result["First Week Average"].round(2)
+    result["Latest Week Average"] = result["Latest Week Average"].round(2)
+    result["Improvement"] = result["Improvement"].round(2)
+    result.insert(0, "S.No", range(1, len(result) + 1))
+    st.dataframe(result, hide_index=True, width="stretch")
 
-topper_display.columns = [
-    "Place",
-    "Student Name",
-    "Average"
-]
 
-topper_display["Average"] = topper_display["Average"].round(2)
+# ============================================================
+# 3. IMPROVEMENT
+# ============================================================
 
-topper_display.insert(
-    0,
-    "S.No",
-    range(1, len(topper_display) + 1)
+st.divider()
+st.subheader("4. Students Showing Improvement")
+st.caption(
+    f"Overall improvement greater than 0 and up to +0.70 from {first_week} to {latest_week}."
 )
 
-st.dataframe(
-    topper_display,
-    hide_index=True,
-    width="stretch"
+if improving_df.empty:
+    show_empty("No students show overall improvement in the selected month.")
+else:
+    result = improving_df[
+        ["student_name", first_week, latest_week, "change"]
+    ].copy()
+    result.columns = [
+        "Student Name",
+        "First Week Average",
+        "Latest Week Average",
+        "Improvement",
+    ]
+    result["First Week Average"] = result["First Week Average"].round(2)
+    result["Latest Week Average"] = result["Latest Week Average"].round(2)
+    result["Improvement"] = result["Improvement"].round(2)
+    result.insert(0, "S.No", range(1, len(result) + 1))
+    st.dataframe(result, hide_index=True, width="stretch")
+
+
+# ============================================================
+# 5. CONTINUOUSLY DECLINING
+# ============================================================
+
+st.divider()
+st.subheader("5. Students Declining Continuously")
+st.caption(
+    "Students whose performance decreases in every consecutive week of the selected month."
 )
 
-
-# ============================================================
-# 2. ABOVE AVERAGE
-# ============================================================
-
-st.divider()
-st.subheader("2. Above Average")
-st.caption(f"Students scoring above the class average of {class_average:.2f} / 5.")
-
-display_student_table(above_average_df)
-
-
-# ============================================================
-# 3. BELOW AVERAGE
-# ============================================================
-
-st.divider()
-st.subheader("3. Below Average")
-st.caption(f"Students scoring below the class average of {class_average:.2f} / 5.")
-
-display_student_table(below_average_df)
+if declining_df.empty:
+    show_empty("No students show continuous decline across every week of the selected month.")
+else:
+    result = declining_df[
+        ["student_name", first_week, latest_week, "change"]
+    ].copy()
+    result.columns = [
+        "Student Name",
+        "First Week Average",
+        "Latest Week Average",
+        "Overall Change",
+    ]
+    result["First Week Average"] = result["First Week Average"].round(2)
+    result["Latest Week Average"] = result["Latest Week Average"].round(2)
+    result["Overall Change"] = result["Overall Change"].round(2)
+    result.insert(0, "S.No", range(1, len(result) + 1))
+    st.dataframe(result, hide_index=True, width="stretch")
 
 
 # ============================================================
-# 4. LAST THREE VERY POOR STUDENTS
+# 6. LAST THREE STUDENTS
 # ============================================================
 
 st.divider()
-st.subheader("4. Last Three Very Poor Students")
-st.caption("The three students with the lowest valid weekly averages.")
+st.subheader("6. Last Three Students")
+st.caption(
+    "Three students with the lowest monthly average among students with valid performance."
+)
 
-display_student_table(very_poor_df)
+if last_three_df.empty:
+    show_empty("No valid student performance is available for this selection.")
+else:
+    result = last_three_df[
+        ["student_name", "monthly_average"]
+    ].copy()
+    result.columns = [
+        "Student Name",
+        "Monthly Average",
+    ]
+    result["Monthly Average"] = result["Monthly Average"].round(2)
+    result.insert(0, "S.No", range(1, len(result) + 1))
+    st.dataframe(result, hide_index=True, width="stretch")
 
 
 # ============================================================
 # PDF HELPERS
 # ============================================================
 
-def _pdf_table(dataframe, title=None, columns=None, empty_text="No students in this category."):
-
-    story = []
-
-    if title:
-        story.append(
-            Paragraph(
-                title,
-                ParagraphStyle(
-                    "SectionTitle",
-                    parent=styles["Heading2"],
-                    fontSize=12,
-                    leading=15,
-                    spaceBefore=7,
-                    spaceAfter=5,
-                )
-            )
-        )
+def pdf_table(dataframe, columns, headers, widths=None):
 
     if dataframe.empty:
-        story.append(
-            Paragraph(
-                empty_text,
-                styles["BodyText"]
-            )
+        return Table(
+            [["No students in this category."]],
+            colWidths=[170 * mm],
+            style=TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]),
         )
-        return story
 
-    if columns is None:
-        columns = list(dataframe.columns)
-
-    table_data = [columns]
+    data = [headers]
 
     for _, row in dataframe.iterrows():
-        table_data.append([
-            str(row[col])
-            for col in columns
-        ])
+        values = []
+        for col in columns:
+            value = row[col]
+            if isinstance(value, float):
+                values.append(f"{value:.2f}")
+            else:
+                values.append(str(value))
+        data.append(values)
 
-    table = Table(
-        table_data,
-        repeatRows=1,
-        hAlign="LEFT"
-    )
+    table = Table(data, colWidths=widths, repeatRows=1)
 
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E9ECEF")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8E8E8")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("LEADING", (0, 0), (-1, -1), 11),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
-        ("ALIGN", (-1, 1), (-1, -1), "CENTER"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN", (-1, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
 
-    story.append(table)
-    story.append(Spacer(1, 6 * mm))
-
-    return story
+    return table
 
 
-styles = getSampleStyleSheet()
-
-pdf_school_style = ParagraphStyle(
-    "PDFSchool",
-    parent=styles["Title"],
-    fontName="Helvetica-Bold",
-    fontSize=18,
-    leading=22,
-    alignment=TA_CENTER,
-    spaceAfter=3,
-)
-
-pdf_subtitle_style = ParagraphStyle(
-    "PDFSubtitle",
-    parent=styles["Normal"],
-    fontName="Helvetica",
-    fontSize=11,
-    leading=14,
-    alignment=TA_CENTER,
-    spaceAfter=2,
-)
-
-pdf_report_title_style = ParagraphStyle(
-    "PDFReportTitle",
-    parent=styles["Heading1"],
-    fontName="Helvetica-Bold",
-    fontSize=15,
-    leading=18,
-    alignment=TA_CENTER,
-    spaceBefore=8,
-    spaceAfter=10,
-)
-
-pdf_meta_style = ParagraphStyle(
-    "PDFMeta",
-    parent=styles["Normal"],
-    fontName="Helvetica",
-    fontSize=10,
-    leading=14,
-    spaceAfter=2,
-)
-
-
-def add_pdf_footer(canvas, doc):
-
-    canvas.saveState()
-
-    canvas.setFont("Helvetica", 8)
-    canvas.drawCentredString(
-        A4[0] / 2,
-        10 * mm,
-        f"The Spice Valley Public School | Weekly DRT Report | Page {doc.page}"
-    )
-
-    canvas.restoreState()
-
-
-# ============================================================
-# BUILD PDF
-# ============================================================
-
-def build_weekly_pdf():
+def build_pdf():
 
     buffer = io.BytesIO()
 
-    doc = SimpleDocTemplate(
+    document = SimpleDocTemplate(
         buffer,
         pagesize=A4,
         rightMargin=14 * mm,
         leftMargin=14 * mm,
         topMargin=14 * mm,
-        bottomMargin=16 * mm,
-        title="Weekly DRT Performance Report",
+        bottomMargin=14 * mm,
+        title="Monthly DRT Performance Report",
         author="The Spice Valley Public School",
+    )
+
+    styles = getSampleStyleSheet()
+
+    school_style = ParagraphStyle(
+        "School",
+        parent=styles["Heading1"],
+        alignment=TA_CENTER,
+        fontName="Helvetica-Bold",
+        fontSize=17,
+        leading=21,
+        spaceAfter=3,
+    )
+
+    subtitle_style = ParagraphStyle(
+        "Subtitle",
+        parent=styles["Normal"],
+        alignment=TA_CENTER,
+        fontName="Helvetica",
+        fontSize=10.5,
+        leading=13,
+        spaceAfter=12,
+    )
+
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Heading2"],
+        alignment=TA_CENTER,
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=18,
+        spaceAfter=10,
+    )
+
+    section_style = ParagraphStyle(
+        "Section",
+        parent=styles["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=11.5,
+        leading=14,
+        spaceBefore=8,
+        spaceAfter=6,
+    )
+
+    normal_style = ParagraphStyle(
+        "NormalCustom",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9.5,
+        leading=13,
+        spaceAfter=4,
     )
 
     story = []
 
-    story.append(
-        Paragraph(
-            "The Spice Valley Public School",
-            pdf_school_style
+    story.append(Paragraph("The Spice Valley Public School", school_style))
+    story.append(Paragraph("CBSE Senior Secondary", subtitle_style))
+    story.append(Paragraph("MONTHLY DRT PERFORMANCE REPORT", title_style))
+
+    story.append(Paragraph(
+        f"Month: <b>{selected_month}</b><br/>"
+        f"Class: <b>{selected_class}</b><br/>"
+        f"Section: <b>{selected_section}</b><br/>"
+        f"Subject: <b>{selected_subject}</b><br/>"
+        f"Weeks Included: <b>{', '.join(all_weeks)}</b>",
+        normal_style,
+    ))
+
+    # Continuous 1st
+    story.append(Paragraph("1. Continuous Topper – 1st Place", section_style))
+
+    if first_place_df.empty:
+        story.append(Paragraph(
+            "No student completed every week of the selected month.",
+            normal_style,
+        ))
+    else:
+        pdf_df = first_place_df.sort_values("monthly_average", ascending=False).copy()
+        pdf_df.insert(0, "S.No", range(1, len(pdf_df) + 1))
+        story.append(pdf_table(
+            pdf_df,
+            ["S.No", "student_name", "monthly_average"],
+            ["S.No", "Student Name", "Monthly Average"],
+            [16 * mm, 105 * mm, 40 * mm],
+        ))
+
+    # Continuous 2nd
+    story.append(Paragraph("2. Continuous Topper – 2nd Place", section_style))
+
+    if second_place_df.empty:
+        story.append(Paragraph(
+            "No continuous 2nd-place student is available.",
+            normal_style,
+        ))
+    else:
+        pdf_df = second_place_df.sort_values("monthly_average", ascending=False).copy()
+        pdf_df.insert(0, "S.No", range(1, len(pdf_df) + 1))
+        story.append(pdf_table(
+            pdf_df,
+            ["S.No", "student_name", "monthly_average"],
+            ["S.No", "Student Name", "Monthly Average"],
+            [16 * mm, 105 * mm, 40 * mm],
+        ))
+
+    story.append(PageBreak())
+
+    # Very good improvement
+    story.append(Paragraph("3. Students Showing Very Good Improvement", section_style))
+
+    if very_good_df.empty:
+        story.append(Paragraph(
+            f"No student improved by more than +0.70 from {first_week} to {latest_week}.",
+            normal_style,
+        ))
+    else:
+        pdf_df = very_good_df.copy()
+        pdf_df.insert(0, "S.No", range(1, len(pdf_df) + 1))
+        story.append(pdf_table(
+            pdf_df,
+            ["S.No", "student_name", first_week, latest_week, "change"],
+            ["S.No", "Student Name", "First Week", "Latest Week", "Improvement"],
+            [13 * mm, 70 * mm, 27 * mm, 27 * mm, 27 * mm],
+        ))
+
+    # Improvement
+    story.append(Paragraph("4. Students Showing Improvement", section_style))
+
+    if improving_df.empty:
+        story.append(Paragraph(
+            f"No student shows overall improvement from {first_week} to {latest_week}.",
+            normal_style,
+        ))
+    else:
+        pdf_df = improving_df.copy()
+        pdf_df.insert(0, "S.No", range(1, len(pdf_df) + 1))
+        story.append(pdf_table(
+            pdf_df,
+            ["S.No", "student_name", first_week, latest_week, "change"],
+            ["S.No", "Student Name", "First Week", "Latest Week", "Improvement"],
+            [13 * mm, 70 * mm, 27 * mm, 27 * mm, 27 * mm],
+        ))
+
+    # Continuously declining
+    story.append(Paragraph("5. Students Declining Continuously", section_style))
+
+    if declining_df.empty:
+        story.append(Paragraph(
+            "No students show continuous decline across every week of the selected month.",
+            normal_style,
+        ))
+    else:
+        pdf_df = declining_df.copy()
+        pdf_df.insert(0, "S.No", range(1, len(pdf_df) + 1))
+        story.append(pdf_table(
+            pdf_df,
+            ["S.No", "student_name", first_week, latest_week, "change"],
+            ["S.No", "Student Name", "First Week", "Latest Week", "Overall Change"],
+            [13 * mm, 70 * mm, 27 * mm, 27 * mm, 27 * mm],
+        ))
+
+    # Last three
+    story.append(Paragraph("6. Last Three Students", section_style))
+
+    if last_three_df.empty:
+        story.append(Paragraph(
+            "No valid student performance is available for this selection.",
+            normal_style,
+        ))
+    else:
+        pdf_df = last_three_df.copy()
+        pdf_df.insert(0, "S.No", range(1, len(pdf_df) + 1))
+        story.append(pdf_table(
+            pdf_df,
+            ["S.No", "student_name", "monthly_average"],
+            ["S.No", "Student Name", "Monthly Average"],
+            [16 * mm, 105 * mm, 40 * mm],
+        ))
+
+    # Method note
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(
+        "Calculation note: Monthly performance is based on the average of each student's "
+        "valid weekly averages. Absent/non-written records are excluded. Improvement is "
+        "the latest-week average minus the first-week average.",
+        normal_style,
+    ))
+
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.drawCentredString(
+            A4[0] / 2,
+            8 * mm,
+            f"Page {doc.page}",
         )
-    )
+        canvas.restoreState()
 
-    story.append(
-        Paragraph(
-            "CBSE Senior Secondary",
-            pdf_subtitle_style
-        )
-    )
-
-    story.append(
-        Paragraph(
-            "WEEKLY DRT PERFORMANCE REPORT",
-            pdf_report_title_style
-        )
-    )
-
-    story.append(
-        Paragraph(
-            f"<b>Week:</b> {selected_week}",
-            pdf_meta_style
-        )
-    )
-
-    story.append(
-        Paragraph(
-            f"<b>Class:</b> {selected_class}",
-            pdf_meta_style
-        )
-    )
-
-    story.append(
-        Paragraph(
-            f"<b>Section:</b> {selected_section}",
-            pdf_meta_style
-        )
-    )
-
-    story.append(
-        Paragraph(
-            f"<b>Subject:</b> {selected_subject}",
-            pdf_meta_style
-        )
-    )
-
-    if start_text and end_text:
-        story.append(
-            Paragraph(
-                f"<b>Period:</b> {start_text} to {end_text}",
-                pdf_meta_style
-            )
-        )
-
-    story.append(
-        Paragraph(
-            f"<b>Class Average:</b> {class_average:.2f} / 5",
-            pdf_meta_style
-        )
-    )
-
-    story.append(Spacer(1, 5 * mm))
-
-    # 1. Toppers
-    topper_pdf = toppers_df[
-        ["rank", "student_name", "marks"]
-    ].copy()
-
-    topper_pdf["Place"] = topper_pdf["rank"].map(
-        {
-            1: "1st Place",
-            2: "2nd Place"
-        }
-    )
-
-    topper_pdf = topper_pdf[
-        ["Place", "student_name", "marks"]
-    ]
-
-    topper_pdf.insert(
-        0,
-        "S.No",
-        range(1, len(topper_pdf) + 1)
-    )
-
-    topper_pdf.columns = [
-        "S.No",
-        "Place",
-        "Student Name",
-        "Average"
-    ]
-
-    topper_pdf["Average"] = topper_pdf["Average"].round(2)
-
-    story.extend(
-        _pdf_table(
-            topper_pdf,
-            "1. First and Second Place",
-            ["S.No", "Place", "Student Name", "Average"]
-        )
-    )
-
-    # 2. Above average
-    above_pdf = above_average_df[["student_name", "marks"]].copy()
-    above_pdf.columns = ["Student Name", "Average"]
-    above_pdf.insert(0, "S.No", range(1, len(above_pdf) + 1))
-    above_pdf["Average"] = above_pdf["Average"].round(2)
-
-    story.extend(
-        _pdf_table(
-            above_pdf,
-            "2. Above Average",
-            ["S.No", "Student Name", "Average"]
-        )
-    )
-
-    # 3. Below average
-    below_pdf = below_average_df[["student_name", "marks"]].copy()
-    below_pdf.columns = ["Student Name", "Average"]
-    below_pdf.insert(0, "S.No", range(1, len(below_pdf) + 1))
-    below_pdf["Average"] = below_pdf["Average"].round(2)
-
-    story.extend(
-        _pdf_table(
-            below_pdf,
-            "3. Below Average",
-            ["S.No", "Student Name", "Average"]
-        )
-    )
-
-    # 4. Very poor
-    poor_pdf = very_poor_df[["student_name", "marks"]].copy()
-    poor_pdf.columns = ["Student Name", "Average"]
-    poor_pdf.insert(0, "S.No", range(1, len(poor_pdf) + 1))
-    poor_pdf["Average"] = poor_pdf["Average"].round(2)
-
-    story.extend(
-        _pdf_table(
-            poor_pdf,
-            "4. Last Three Very Poor Students",
-            ["S.No", "Student Name", "Average"]
-        )
-    )
-
-    doc.build(
+    document.build(
         story,
-        onFirstPage=add_pdf_footer,
-        onLaterPages=add_pdf_footer
+        onFirstPage=add_page_number,
+        onLaterPages=add_page_number,
     )
 
     buffer.seek(0)
@@ -1115,25 +1322,35 @@ def build_weekly_pdf():
 # ============================================================
 
 st.divider()
+st.subheader("Download Monthly Report")
 
-pdf_bytes = build_weekly_pdf()
+pdf_bytes = build_pdf()
 
-safe_class = re.sub(r"[^A-Za-z0-9]+", "_", str(selected_class)).strip("_")
-safe_subject = re.sub(r"[^A-Za-z0-9]+", "_", str(selected_subject)).strip("_")
-safe_week = re.sub(r"[^A-Za-z0-9]+", "_", str(selected_week)).strip("_")
+safe_month = re.sub(r"[^A-Za-z0-9]+", "_", selected_month).strip("_")
+safe_class = re.sub(r"[^A-Za-z0-9]+", "_", selected_class).strip("_")
+safe_section = re.sub(r"[^A-Za-z0-9]+", "_", selected_section).strip("_")
+safe_subject = re.sub(r"[^A-Za-z0-9]+", "_", selected_subject).strip("_")
 
-pdf_filename = (
-    f"DRT_Weekly_Report_{safe_week}_{safe_class}_{safe_subject}.pdf"
+filename = (
+    f"Monthly_DRT_Report_"
+    f"{safe_month}_"
+    f"{safe_class}_"
+    f"{safe_section}_"
+    f"{safe_subject}.pdf"
 )
 
 st.download_button(
-    label="Download Weekly Report PDF",
+    label="Download Monthly Report PDF",
     data=pdf_bytes,
-    file_name=pdf_filename,
+    file_name=filename,
     mime="application/pdf",
-    type="primary"
+    width="stretch",
 )
 
-st.caption(
-    f"Generated on {datetime.now().strftime('%d-%m-%Y %I:%M %p')}"
-)
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+st.caption("DRT Analytics V2 • Monthly subject performance report")
